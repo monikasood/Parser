@@ -1,48 +1,82 @@
 package simplenem12;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.function.BiConsumer;
+
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVParser;
+import org.apache.commons.csv.CSVRecord;
 
 public class SimpleNem12ParserImpl implements SimpleNem12Parser {
 
 	
 	@Override
 	public Collection<MeterRead> parseSimpleNem12(File simpleNem12File) {
+		
 		Map<String,MeterRead> meterReads= new HashMap<>();
-		BufferedReader reader =null;
-		String line=null;
-		try {
-			if(simpleNem12File == null)
+		
+		List<String> errors = new ArrayList<>();
+		BiConsumer<CSVRecord,List<String>> validateVolume= (rec,errs)->{
+			if(!"300".equals(rec.get(0)))
 			{
-				throw new Exception("Please provide the file to parse");
+				errs.add("Record Type should be 300");
 			}
-			reader = new BufferedReader(new InputStreamReader(new FileInputStream(simpleNem12File), "UTF-8"));
-			int rowNum =0;
-			String recordType=null;
-			MeterRead meterRead = null;
-			while(( line = reader.readLine()) !=null)
+			if(!isNumeric(rec.get(2)))
 			{
-				String obj[] = line.split(",");
-				recordType = obj[0];
-				if(rowNum ==0 && !"100".equals(recordType))
+				errs.add("Volume value is invalid." + rec.get(2));
+			}
+			if(rec.get(3).equals(Quality.A) || rec.get(3).equals(Quality.E))
+			{
+				errs.add("Quality value is invalid.");
+			}
+		};
+		BiConsumer<CSVRecord, MeterRead> processVolume = (rec,mRead)->{
+			if("300".equals(rec.get(0)) && mRead !=null)
+			{
+				
+				validateVolume.accept(rec,errors );
+				if(errors.isEmpty())
 				{
-					throw new Exception("First record should be of type 100.");
+					LocalDate date = LocalDate.parse(rec.get(1),DateTimeFormatter.BASIC_ISO_DATE);
+					BigDecimal volume =new BigDecimal(rec.get(2));
+					Quality quality=null;
+					quality = Quality.valueOf(rec.get(3));
+					
+					MeterVolume meterVol = new MeterVolume(volume, quality);
+					mRead.appendVolume(date, meterVol);
 				}
-				rowNum++;
+				else
+				{
+					System.out.println(errors.size());
+					errors.forEach(e->System.out.println(e));
+				}
+			}
+		};
+		CSVParser parser =null;
+		try 
+		{
+			parser= CSVFormat.DEFAULT.withDelimiter(',').parse(new InputStreamReader(new FileInputStream(simpleNem12File)));
+			String recordType=null;
+			MeterRead meterRead=null;
+			for(CSVRecord record : parser)
+			{
+				recordType = record.get(0);
 				if("200".equals(recordType))
 				{
 					EnergyUnit eUnit = null;
 					try{
-						eUnit = EnergyUnit.valueOf(obj[2]);
+						eUnit = EnergyUnit.valueOf(record.get(2));
 					}
 					catch(IllegalArgumentException le)
 					{
@@ -50,34 +84,17 @@ public class SimpleNem12ParserImpl implements SimpleNem12Parser {
 					}
 					if(eUnit != null)
 					{
-						meterRead = meterReads.get(obj[1]);
+						meterRead = meterReads.get(record.get(2));
 						if(meterRead == null)
-							meterRead = new MeterRead(obj[1], EnergyUnit.valueOf(obj[2]));
+							meterRead = new MeterRead(record.get(1), EnergyUnit.valueOf(record.get(2)));
 						meterReads.put(meterRead.getNmi(), meterRead);
 					}
 				}
-				if("300".equals(recordType))
+				
+				if(recordType.equals("300"))
 				{
-					if(meterRead ==null)
-					{
-						throw new Exception("Volume details must be preceeded by NMI details.");
-					}
-					LocalDate date = LocalDate.parse(obj[1],DateTimeFormatter.BASIC_ISO_DATE);
-					if(!isNumeric(obj[2]))
-					{
-						throw new Exception("Volume value is invalid.");
-					}
-					BigDecimal volume =new BigDecimal(obj[2]);
-					Quality quality=null;
-					try {
-						quality = Quality.valueOf(obj[3]);
-					} 
-					catch (IllegalArgumentException e) {
-						throw new Exception("Quality value is invalid");
-					}
-					MeterVolume meterVol = new MeterVolume(volume, quality);
-					meterRead.appendVolume(date, meterVol);
 					
+					processVolume.accept(record,meterRead);
 				}
 				
 			}
@@ -86,14 +103,16 @@ public class SimpleNem12ParserImpl implements SimpleNem12Parser {
 				throw new Exception("Last record should be of type 900.");
 				
 			}
+		} catch (IOException e2) {
+			System.err.println(e2.getMessage());
 		}
-		catch (Exception e) {
-			System.out.println(e.getMessage());
-			return Collections.emptyList();
+		catch(Exception le)
+		{
+			System.err.println(le.getMessage());
 		}
 		finally {
 			try{
-			reader.close();
+			parser.close();
 			}
 			catch(Exception e1)
 			{
